@@ -27,6 +27,9 @@ import (
 	"strconv"
 	"sync"
 	"time"
+
+	"github.com/Workiva/app_intelligence_go/telemetry"
+	metrics "github.com/rcrowley/go-metrics"
 )
 
 var (
@@ -55,6 +58,9 @@ type conn struct {
 
 	// Scratch space for formatting integers and floats.
 	numScratch [40]byte
+
+	doTimer   metrics.Timer
+	sendTimer metrics.Timer
 }
 
 // DialTimeout acts like Dial but takes timeouts for establishing the
@@ -218,12 +224,25 @@ func Dial(network, address string, options ...DialOption) (Conn, error) {
 		netConn = tlsConn
 	}
 
+	config := telemetry.GetDefaultConfig()
+	registry := metrics.NewPrefixedRegistry("messaging-frontend.redigo.")
+	config.Registry = registry
+	reporter, _ := telemetry.NewReporterWithConfig(config)
+	reporter.Start()
+
+	doTimer := metrics.NewTimer()
+	sendTimer := metrics.NewTimer()
+	registry.Register("doTimer", doTimer)
+	registry.Register("sendTimer", sendTimer)
+
 	c := &conn{
 		conn:         netConn,
 		bw:           bufio.NewWriter(netConn),
 		br:           bufio.NewReader(netConn),
 		readTimeout:  do.readTimeout,
 		writeTimeout: do.writeTimeout,
+		doTimer:      doTimer,
+		sendTimer:    sendTimer,
 	}
 
 	if do.password != "" {
@@ -585,6 +604,8 @@ func (c *conn) readReply() (interface{}, error) {
 }
 
 func (c *conn) Send(cmd string, args ...interface{}) error {
+	start := time.Now()
+	defer c.sendTimer.UpdateSince(start)
 	c.mu.Lock()
 	c.pending += 1
 	c.mu.Unlock()
@@ -640,6 +661,8 @@ func (c *conn) ReceiveWithTimeout(timeout time.Duration) (reply interface{}, err
 }
 
 func (c *conn) Do(cmd string, args ...interface{}) (interface{}, error) {
+	start := time.Now()
+	defer c.doTimer.UpdateSince(start)
 	return c.DoWithTimeout(c.readTimeout, cmd, args...)
 }
 
