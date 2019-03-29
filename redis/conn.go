@@ -28,7 +28,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Workiva/app_intelligence_go/telemetry"
 	metrics "github.com/rcrowley/go-metrics"
 )
 
@@ -67,8 +66,8 @@ type conn struct {
 // connection to the server, writing a command and reading a reply.
 //
 // Deprecated: Use Dial with options instead.
-func DialTimeout(network, address string, connectTimeout, readTimeout, writeTimeout time.Duration) (Conn, error) {
-	return Dial(network, address,
+func DialTimeout(network, address string, registry metrics.Registry, connectTimeout, readTimeout, writeTimeout time.Duration) (Conn, error) {
+	return Dial(network, address, registry,
 		DialConnectTimeout(connectTimeout),
 		DialReadTimeout(readTimeout),
 		DialWriteTimeout(writeTimeout))
@@ -182,7 +181,12 @@ func DialUseTLS(useTLS bool) DialOption {
 
 // Dial connects to the Redis server at the given network and
 // address using the specified options.
-func Dial(network, address string, options ...DialOption) (Conn, error) {
+func Dial(network, address string, registry metrics.Registry, options ...DialOption) (Conn, error) {
+	tcpTimer := registry.GetOrRegister("tcpTimer", metrics.NewTimer()).(metrics.Timer)
+	tlsTimer := registry.GetOrRegister("tlsTimer", metrics.NewTimer()).(metrics.Timer)
+	doTimer := registry.GetOrRegister("doTimer", metrics.NewTimer()).(metrics.Timer)
+	sendTimer := registry.GetOrRegister("sendTimer", metrics.NewTimer()).(metrics.Timer)
+
 	do := dialOptions{
 		dialer: &net.Dialer{
 			KeepAlive: time.Minute * 5,
@@ -195,12 +199,15 @@ func Dial(network, address string, options ...DialOption) (Conn, error) {
 		do.dial = do.dialer.Dial
 	}
 
+	now := time.Now()
 	netConn, err := do.dial(network, address)
 	if err != nil {
 		return nil, err
 	}
+	tcpTimer.UpdateSince(now)
 
 	if do.useTLS {
+		now := time.Now()
 		var tlsConfig *tls.Config
 		if do.tlsConfig == nil {
 			tlsConfig = &tls.Config{InsecureSkipVerify: do.skipVerify}
@@ -222,18 +229,8 @@ func Dial(network, address string, options ...DialOption) (Conn, error) {
 			return nil, err
 		}
 		netConn = tlsConn
+		tlsTimer.UpdateSince(now)
 	}
-
-	config := telemetry.GetDefaultConfig()
-	registry := metrics.NewPrefixedRegistry("messaging-frontend.redigo.")
-	config.Registry = registry
-	reporter, _ := telemetry.NewReporterWithConfig(config)
-	reporter.Start()
-
-	doTimer := metrics.NewTimer()
-	sendTimer := metrics.NewTimer()
-	registry.Register("doTimer", doTimer)
-	registry.Register("sendTimer", sendTimer)
 
 	c := &conn{
 		conn:         netConn,
@@ -274,7 +271,7 @@ var pathDBRegexp = regexp.MustCompile(`/(\d*)\z`)
 // DialURL connects to a Redis server at the given URL using the Redis
 // URI scheme. URLs should follow the draft IANA specification for the
 // scheme (https://www.iana.org/assignments/uri-schemes/prov/redis).
-func DialURL(rawurl string, options ...DialOption) (Conn, error) {
+func DialURL(rawurl string, registry metrics.Registry, options ...DialOption) (Conn, error) {
 	u, err := url.Parse(rawurl)
 	if err != nil {
 		return nil, err
@@ -322,7 +319,7 @@ func DialURL(rawurl string, options ...DialOption) (Conn, error) {
 
 	options = append(options, DialUseTLS(u.Scheme == "rediss"))
 
-	return Dial("tcp", address, options...)
+	return Dial("tcp", address, registry, options...)
 }
 
 // NewConn returns a new Redigo connection for the given net connection.
